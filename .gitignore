@@ -1,0 +1,10 @@
+# dbt artefacts (if you run dbt from a checkout of this repository)
+target/
+dbt_packages/
+logs/
+
+# editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

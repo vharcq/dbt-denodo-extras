@@ -1,0 +1,19 @@
+dbt-denodo-extras
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This repository contains code derived from dbt-denodo 1.0.0, the dbt adapter
+for Denodo published on PyPI (https://pypi.org/project/dbt-denodo/):
+
+    Copyright (c) 2026, denodo technologies (http://www.denodo.com)
+    Licensed under the Apache License, Version 2.0
+    Part of the DenodoConnect component collection.
+
+Two macros in macros/_adapter__denodo.sql are modified versions of macros of
+that adapter and keep their names, so that dbt uses them in their place:
+
+    denodo__get_catalog     reads GET_VIEW_COLUMNS() joined to GET_VIEWS() and
+                            filters on the output column database_name
+    denodo__create_folder   creates every level of a nested folder path
+
+Everything else in this repository is original work. Nothing from the adapter
+package itself, and no Denodo driver or binary, is redistributed here.
