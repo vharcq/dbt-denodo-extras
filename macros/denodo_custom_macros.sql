@@ -71,7 +71,9 @@
     {%- if governed | length == 0 -%}
         SELECT 1
     {%- else -%}
-        {%- set view = this.database ~ '.' ~ this.identifier -%}
+        {#- database quoted: unquoted, a name with capitals is folded to lower case over
+            the PostgreSQL interface and not found (see _adapter__denodo.sql, 6.) -#}
+        {%- set view = '"' ~ this.database ~ '".' ~ this.identifier -%}
         {%- set statements = [] -%}
         {%- for tag in governed -%}
             {%- set add_views, rm_views = [], [] -%}
@@ -192,10 +194,10 @@
                     {%- if p not in granted -%}{%- do revoked.append(p) -%}{%- endif -%}
                 {%- endfor -%}
                 {%- if granted -%}
-                    {%- do statements.append('ALTER ROLE ' ~ role ~ ' GRANT ' ~ granted | join(', ') ~ ' ON ' ~ vdb) -%}
+                    {%- do statements.append('ALTER ROLE ' ~ role ~ ' GRANT ' ~ granted | join(', ') ~ ' ON "' ~ vdb ~ '"') -%}
                 {%- endif -%}
                 {%- if revoked -%}
-                    {%- do statements.append('ALTER ROLE ' ~ role ~ ' REVOKE ' ~ revoked | join(', ') ~ ' ON ' ~ vdb) -%}
+                    {%- do statements.append('ALTER ROLE ' ~ role ~ ' REVOKE ' ~ revoked | join(', ') ~ ' ON "' ~ vdb ~ '"') -%}
                 {%- endif -%}
             {%- endfor -%}
 

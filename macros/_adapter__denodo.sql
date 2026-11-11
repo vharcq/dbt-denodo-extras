@@ -3,15 +3,16 @@
    dbt-denodo — COMPATIBILITY LAYER
   ============================================================================
 
-  Five overrides for the official `dbt-denodo 1.0.0` adapter, grouped in one file so
+  Seven overrides for the official `dbt-denodo 1.0.0` adapter, grouped in one file so
   they can be upstreamed. They contain NOTHING project-specific: they can move as-is
   into the adapter (`dbt/include/denodo/macros/`), after which this file is no longer
   needed.
 
   Tested on: Denodo Virtual DataPort 9.4.7, dbt-core 1.12.6, dbt-denodo 1.0.0.
 
-  Origin: overrides 2 (`denodo__get_catalog`) and 4 (`denodo__create_folder`) are
-  modified versions of the macros of the same name in dbt-denodo 1.0.0,
+  Origin: overrides 2 (`denodo__get_catalog`), 4 (`denodo__create_folder`) and 6
+  (drop, rename, create_table_as) are modified versions of the macros of the same
+  name in dbt-denodo 1.0.0,
   Copyright (c) 2026 denodo technologies, Apache License 2.0. The comment above each
   one says what was changed. The other overrides are original. See NOTICE.
 
@@ -20,6 +21,8 @@
    3. `denodo__get_empty_schema_sql`  — contracts on decimal columns, without warning
    4. `denodo__create_folder`         — `folder='/a/b/c'` creates `/a` and `/a/b` too
    5. `persist_docs`                  — YAML descriptions written into Denodo
+   6. drop / rename / `table`         — database names with upper case letters
+   7. `table` materialization         — cache the view in place, reload atomically
 
   Packaging note: a materialization defined in a dbt **package** is silently ignored;
   shipped in the **adapter**, it applies correctly. On the project side it must live in
@@ -213,7 +216,7 @@
         {%- set database_name = database if database else (target.database) -%}
         {%- set parts = folder_path.strip('/').split('/') -%}
         {%- call statement('create_folder') -%}
-            CONNECT DATABASE {{ database_name }};
+            CONNECT DATABASE "{{ database_name }}";
             {%- for i in range(parts | length) %}
             CREATE OR REPLACE FOLDER '/{{ parts[:i + 1] | join('/') }}'{{ ";" if not loop.last }}
             {%- endfor %}
@@ -250,7 +253,7 @@
 
 
 {% macro denodo__alter_relation_comment(relation, comment) -%}
-    CONNECT DATABASE {{ relation.database }};
+    CONNECT DATABASE "{{ relation.database }}";
     ALTER VIEW "{{ relation.identifier }}" DESCRIPTION = {{ denodo_vql_literal(comment) }}
 {%- endmacro %}
 
@@ -261,7 +264,7 @@
         {%- do described.append(col) -%}
     {%- endfor -%}
     {%- if described -%}
-    CONNECT DATABASE {{ relation.database }};
+    CONNECT DATABASE "{{ relation.database }}";
     ALTER VIEW "{{ relation.identifier }}" (
         {%- for col in described %}
         ALTER COLUMN "{{ col['name'] }}" ADD ( DESCRIPTION = {{ denodo_vql_literal(col['description']) }} )
@@ -270,4 +273,200 @@
     {%- else -%}
     SELECT 1
     {%- endif -%}
+{%- endmacro %}
+
+
+{#
+  ---------------------------------------------------------------------------
+   6. drop / rename / `table` — database names with upper case letters
+  ---------------------------------------------------------------------------
+  The adapter writes the database name UNQUOTED in its VQL (`CONNECT DATABASE x`,
+  `DROP VIEW x."v"`). Over the PostgreSQL interface an unquoted identifier is folded
+  to lower case, so a database whose name has capitals is not found:
+
+      CONNECT DATABASE Sales_Gold     -> Error loading database 'sales_gold'
+      CONNECT DATABASE "Sales_Gold"   -> OK
+
+  Measured on 9.4.7: every model of such a database fails on its first statement. The
+  demo databases are all lower case, so it never showed there. Overrides 4 and 5 quote
+  the name too.
+
+  Fix: the adapter's macros, unchanged except for the quotes around the database
+  name. They cover the `view` materialization's drops and the whole `table` one
+  (create, cache, rename, drop). A root-project macro takes precedence over the
+  adapter's one even where the adapter calls it by its bare name. Not covered: remote
+  tables (`remote=true`), `incremental`, `materialized_view`.
+#}
+{% macro denodo__drop_view(relation) -%}
+    {% call statement('drop_view', auto_begin=False) -%}
+         CONNECT DATABASE "{{ relation.database }}";
+         DROP VIEW IF EXISTS "{{ relation.database }}"."{{ relation.identifier }}"  CASCADE;
+    {%- endcall %}
+{% endmacro %}
+
+
+{% macro denodo__drop_table(relation) -%}
+    {% call statement('drop_table', auto_begin=False) -%}
+        DROP TABLE IF EXISTS "{{ relation.database }}"."{{ relation.identifier }}"  CASCADE
+    {%- endcall %}
+{% endmacro %}
+
+
+{% macro denodo__rename_relation(from_relation, to_relation) -%}
+    {% set drop_query %}
+        DROP VIEW IF EXISTS "{{ to_relation.database }}"."{{ to_relation.identifier }}" CASCADE
+    {% endset %}
+    {% do run_query(drop_query) %}
+
+    {% call statement('rename_relation') -%}
+        CONNECT DATABASE "{{ from_relation.database }}";
+        ALTER VIEW "{{ from_relation.identifier }}"
+        RENAME "{{ to_relation.identifier }}";
+    {%- endcall %}
+
+    {% set relation_type = from_relation.type if from_relation is not none and from_relation.type is not none else to_relation.type %}
+    {% set relation_type_normalized = relation_type | string | lower if relation_type is not none else '' %}
+    {% set materialized_config = config.get('materialized') if config is defined else none %}
+    {% if materialized_config == 'table' or relation_type_normalized == 'table' %}
+        {% call statement('update_cache_table_name') -%}
+            ALTER VIEW "{{ to_relation.identifier }}"
+            CACHE FULL NO_STATUS
+            BATCHSIZEINCACHE DEFAULT
+            TIMETOLIVEINCACHE NOEXPIRE
+            CACHE_TABLE_NAME '{{ to_relation.identifier }}'
+        {%- endcall %}
+    {% endif %}
+{% endmacro %}
+
+
+{% macro denodo__create_table_as(temporary, relation, sql) -%}
+    {% if config.get('remote') | string | lower == 'true' %}
+        {% do exceptions.raise_compiler_error("remote=true is not covered by the override of denodo__create_table_as in dbt-denodo-extras") %}
+    {% endif %}
+
+    {%- call statement('create_view') -%}
+        CREATE OR REPLACE VIEW {{ relation }}
+        {% if config.get('folder') -%}
+            FOLDER = '{{ config.get('folder') }}'
+        {%- endif %}
+        AS
+        {{ sql }}
+    {%- endcall -%}
+
+    {%- call statement('setup_cache') -%}
+        CONNECT DATABASE "{{ relation.database }}";
+
+        ALTER VIEW "{{ relation.identifier }}"
+        CACHE FULL NO_STATUS
+        BATCHSIZEINCACHE DEFAULT
+        TIMETOLIVEINCACHE NOEXPIRE
+        CACHE_TABLE_NAME '{{ relation.identifier }}'
+    {%- endcall -%}
+
+    {%- call statement('load_cache') -%}
+        SELECT * FROM {{ relation }}
+        CONTEXT (
+        'i18n'='us_pst',
+        'cache_preload'='true',
+        'cache_wait_for_load'='true'
+        )
+    {%- endcall -%}
+
+    {{ return('SELECT * FROM ' ~ relation) }}
+{%- endmacro %}
+
+
+{#
+  ---------------------------------------------------------------------------
+   7. `table` MATERIALIZATION — cache the view in place, reload atomically
+  ---------------------------------------------------------------------------
+  The adapter's `table` materialization builds `<x>__dbt_tmp`, gives it
+  `CACHE FULL … CACHE_TABLE_NAME '<x>__dbt_tmp'`, preloads it, renames the current
+  view to `<x>__dbt_backup`, renames the temp view to `<x>`, sets its
+  `CACHE_TABLE_NAME` to `'<x>'` and drops the backup with `CASCADE`. Three problems:
+    - the views built on top of a `table` model are dropped on every build (the
+      CASCADE), and its tags and view-level privileges go with the object (see 1.);
+    - the cache engine names its physical tables itself (measured: `GET_CACHE_TABLE`
+      returns `<x>_<number>` after a build that asked for `'<x>'`), so the renames
+      fight it;
+    - the preload of `<x>__dbt_tmp` fails now and then with "Error executing data
+      movement from view <x>__dbt_tmp to source vdpcachedatasource", and a failed build
+      leaves `<x>__dbt_tmp` behind.
+
+  Fix: what Design Studio and the Scheduler do. Replace the view in place, as in 1.,
+  enable the full cache, and reload it with `'cache_invalidate' = 'all_rows'`. Without
+  control columns (`NO_STATUS`, the default) the cache engine then loads a new cache
+  table and switches to it at the end: the replacement is atomic, a query running
+  during the load reads the previous data (Administration Guide, "Full Mode"). No temp
+  view, no rename, no drop.
+
+  The cache table gets a fixed name ("Custom table name", 9.3+): the view's name, or
+  `config(cache_table_name='…')`. Denodo adds a numeric suffix when the name is already
+  taken, which is how the adapter's renames ended up with `<x>_<number>`;
+  `GET_CACHE_TABLE()` returns the real name.
+
+  `config(cache_preload=false)` skips the reload: the build only defines the view and
+  its cache, and the data is loaded elsewhere, typically by a Scheduler job with
+  retries when the source is unreliable. The cached data survives the rebuild
+  (measured: the previous rows are still served after `CREATE OR REPLACE` + `ALTER VIEW
+  … CACHE FULL`), but a NEW model returns no row until its first load.
+
+  `CREATE OR REPLACE` turns the cache off (cache_status 3 -> 0), hence the `ALTER VIEW
+  … CACHE FULL` on every build; between the two statements, a query reads the source.
+  Not covered: remote tables (`remote=true`).
+#}
+{% materialization table, adapter='denodo' -%}
+    {{ return(denodo_table_replace(this, sql, pre_hooks, post_hooks)) }}
+{%- endmaterialization %}
+
+
+{% macro denodo_table_replace(target, sql, pre_hooks, post_hooks) -%}
+
+    {%- set target_relation = target.incorporate(type='table') -%}
+
+    {% if config.get('remote') | string | lower == 'true' %}
+        {% do exceptions.raise_compiler_error("remote=true is not covered by the `table` materialization of dbt-denodo-extras") %}
+    {% endif %}
+
+    {{ run_hooks(pre_hooks, inside_transaction=False) }}
+    {{ run_hooks(pre_hooks, inside_transaction=True) }}
+
+    {%- set contract_config = config.get('contract') -%}
+    {%- if contract_config and contract_config.enforced -%}
+        {{ get_assert_columns_equivalent(sql) }}
+    {%- endif -%}
+
+    {% call statement('main') -%}
+        {{ denodo__create_view_as(target_relation, sql) }}
+    {%- endcall %}
+
+    {% call statement('enable_cache') -%}
+        CONNECT DATABASE "{{ target_relation.database }}";
+        ALTER VIEW "{{ target_relation.identifier }}"
+        CACHE FULL NO_STATUS
+        BATCHSIZEINCACHE DEFAULT
+        TIMETOLIVEINCACHE NOEXPIRE
+        CACHE_TABLE_NAME '{{ config.get('cache_table_name', target_relation.identifier) }}'
+    {%- endcall %}
+
+    {% if config.get('cache_preload', true) %}
+    {% call statement('load_cache') -%}
+        SELECT * FROM {{ target_relation }}
+        CONTEXT (
+            'cache_preload' = 'true',
+            'cache_invalidate' = 'all_rows',
+            'cache_wait_for_load' = 'true',
+            'cache_return_query_results' = 'false'
+        )
+    {%- endcall %}
+    {% endif %}
+
+    {% do persist_docs(target_relation, model) %}
+
+    {{ run_hooks(post_hooks, inside_transaction=True) }}
+    {% do adapter.commit() %}
+    {{ run_hooks(post_hooks, inside_transaction=False) }}
+
+    {{ return({'relations': [target_relation]}) }}
+
 {%- endmacro %}

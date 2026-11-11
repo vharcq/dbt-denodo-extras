@@ -35,7 +35,7 @@ Bronze and silver share one database here because, on a virtualization layer, th
 | File | Content |
 |---|---|
 | `macros/denodo_custom_macros.sql` | Governance as code: roles and privileges (`denodo_apply_roles`), tags (`denodo_apply_tags`), drift audit (`denodo_audit`) |
-| `macros/_adapter__denodo.sql` | Compatibility layer for `dbt-denodo` 1.0.0: five overrides, each documented with its diagnosis and the test that validated it |
+| `macros/_adapter__denodo.sql` | Compatibility layer for `dbt-denodo` 1.0.0: seven overrides, each documented with its diagnosis and the test that validated it |
 | `macros/_adapter__core.sql` | `generate_schema_name`: the schema follows the database (Denodo has no schemas) |
 
 ### 1. Roles and privileges: who may open which database
@@ -169,6 +169,30 @@ Why report only, and not fix: an access granted at 3 a.m. during an incident may
 | 3 | `denodo__get_empty_schema_sql` | Contracts on `decimal` columns work without an unactionable precision warning (Denodo rejects `cast(NULL as decimal(p,s))`). |
 | 4 | `denodo__create_folder` | `folder: '/a/b/c'` creates the parent folders first. |
 | 5 | `persist_docs` | `description:` of models and columns is written into Denodo (`ALTER VIEW … DESCRIPTION`) on every build, where the Data Catalog, BI tools and the Denodo MCP Server read it. |
+| 6 | drop, rename, `create_table_as` | A database whose name has capitals (`Sales_Gold`) works. The adapter writes the name unquoted (`CONNECT DATABASE Sales_Gold`), the PostgreSQL interface folds it to lower case, and the database is not found. Overrides 4 and 5 quote it too. |
+| 7 | `table` materialization | Caches the view in place, as Design Studio and the Scheduler do, instead of a temporary view, two renames and a `DROP … CASCADE`. Views built on top of a `table` model now survive its rebuild, the reload is atomic, the cache table gets a fixed name, and `cache_preload=false` leaves the load to the Scheduler. See below. |
+
+#### The `table` materialization: a cache, reloaded in place
+
+On Denodo, `materialized='table'` means a view with a full cache. One build issues:
+
+```sql
+CREATE OR REPLACE VIEW "sales"."agg_sales_by_label" AS SELECT …;
+ALTER VIEW "agg_sales_by_label" CACHE FULL NO_STATUS … CACHE_TABLE_NAME 'agg_sales_by_label';
+SELECT * FROM "sales"."agg_sales_by_label"
+  CONTEXT ('cache_preload'='true', 'cache_invalidate'='all_rows', 'cache_wait_for_load'='true', 'cache_return_query_results'='false');
+```
+
+- **The object is kept.** As with `view` (override 1), the views built on it, in any database, keep working; so do its tags and view-level privileges. The adapter's own version renamed and dropped it with `CASCADE` on every build, taking the views built on it along, and left `<x>__dbt_tmp` behind when the load failed.
+- **The reload is atomic.** Without control columns (`NO_STATUS`, the default), `'cache_invalidate'='all_rows'` loads a new cache table and switches to it at the end: a query running during the load reads the previous data, and a load that fails leaves the previous data in place (measured).
+- **The cache table has a known name**, the view's name ("Custom table name", Denodo 9.3+), or `config(cache_table_name='…')`. Denodo adds a numeric suffix when the name is already taken, for instance by a table left by the adapter's renames: `GET_CACHE_TABLE()` returns the real name.
+- **`config(cache_preload=false)`** defines the view and its cache without loading it. Use it when a Scheduler job loads the cache (with retries, when the source is unreliable), or when the load is too long for a build. The data cached before the build is still served after it; a new model returns no row until its first load.
+
+```sql
+{{ config(materialized='table', cache_preload=false) }}
+```
+
+Not covered: remote tables (`remote=true`), `incremental` and `materialized_view` keep the adapter's behaviour.
 
 Each override is self-contained and can move as-is into the adapter's `dbt/include/denodo/macros/`. Once the adapter ships the equivalent, delete the override.
 
@@ -237,9 +261,12 @@ Deployment order matters once roles come from dbt: anything that names a role (a
 ## Good to know
 
 - The role hook runs at the start of `dbt run`, `build`, `test` and the other commands that trigger `on-run-start`, and it creates roles and grants privileges: the account dbt connects with must be allowed to do that. The audit reads `DESC VQL ROLE` and `DESC VQL USER`, which only an administrator can run on other accounts. The demo connects as an administrator.
-- A `materialized='table'` model is a Denodo cache: building it reads the sources, and it is always dropped and recreated.
+- A `materialized='table'` model is a Denodo cache: building it reads the sources, unless `cache_preload=false`. It is modified in place (override 7), not dropped and recreated.
+- A source that fails now and then fails the build of the `table` model that loads it, and the previous cached data stays. `dbt retry` re-runs only what failed; or leave the load to the Scheduler with `cache_preload=false`.
 - `CREATE OR REPLACE` keeps an object's identity but replaces its definition: a description or a cache set by hand on a dbt-managed view is replaced on the next build. Declare them in dbt (`description:` with `persist_docs`, `materialized='table'`).
 - dbt never drops a view whose model was deleted: `denodo_audit` lists it.
+- `persist_docs` fails on a model whose top level is a `UNION` ("The field properties can only be specified for derived fields"): Denodo accepts no column description on a union view. Wrap it: `select a, b from ( … union all … ) u`.
+- Database names with capitals work everywhere the macros name a database (`CONNECT DATABASE`, `ALTER TAG`, `ALTER ROLE … ON`): they are always quoted.
 
 ## Compatibility
 
