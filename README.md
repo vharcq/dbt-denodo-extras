@@ -37,7 +37,7 @@ The dbt folder names above are dbt's convention, mapped to a database by `+datab
 | File | Content |
 |---|---|
 | `macros/denodo_custom_macros.sql` | Governance as code: roles and privileges (`denodo_apply_roles`), tags (`denodo_apply_tags`), drift audit (`denodo_audit`) |
-| `macros/_adapter__denodo.sql` | Compatibility layer for `dbt-denodo` 1.0.0: eight overrides, each documented with its diagnosis and the test that validated it |
+| `macros/_adapter__denodo.sql` | Compatibility layer for `dbt-denodo` 1.0.0: nine overrides, each documented with its diagnosis and the test that validated it |
 | `macros/_adapter__core.sql` | `generate_schema_name`: the schema follows the database (Denodo has no schemas) |
 
 ### 1. Roles and privileges: who may open which database
@@ -174,6 +174,7 @@ Why report only, and not fix: an access granted at 3 a.m. during an incident may
 | 6 | drop, rename, `create_table_as` | A database whose name has capitals (`Sales_Gold`) works. The adapter writes the name unquoted (`CONNECT DATABASE Sales_Gold`), the PostgreSQL interface folds it to lower case, and the database is not found. Overrides 4 and 5 quote it too. |
 | 7 | `table` materialization | Caches the view in place, as Design Studio and the Scheduler do, instead of a temporary view, two renames and a `DROP … CASCADE`. Views built on top of a `table` model now survive its rebuild, the reload is atomic, the cache table gets a fixed name, and `cache_preload=false` leaves the load to the Scheduler. See below. |
 | 8 | `denodo__create_view_as` | Opt-in (`vars: denodo: folder_from_path: true`): the Denodo folder of a view is its directory under `models/<database>/`, so no model needs `config(folder=...)`, and a model filed under the wrong database fails before any VQL is sent. See below. |
+| 9 | `seed` materialization | A seed is a cached view of literal rows (`SELECT … FROM dual() UNION ALL …`) replaced in place through override 7, in the seed's own database and folder. The adapter's version created a materialized table in the profile's connection database, and dropped it with `CASCADE` (dependent views included) on every `dbt seed`. Use `column_types` to keep a code of digits as text. |
 
 #### The `table` materialization: a cache, reloaded in place
 
@@ -216,7 +217,7 @@ models/
 - **One `+database` per top directory**, named like the database (example below). The first directory must equal the model's database: a model under `models/sales/` that writes into `sales_staging` fails at build time, before any VQL is sent, rather than creating a view in a database the tree does not show.
 - **Sub-directories nest**: `models/sales/50 Reporting/finance/x.sql` goes to `/50 Reporting/finance` (parents created by override 4).
 - **An explicit `config(folder=...)` still wins**, and without the var nothing changes: existing projects are not affected.
-- The view and `table` materializations of this layer both go through it. `incremental`, `materialized_view` and seeds keep the adapter's `config(folder=...)`.
+- The view and `table` materializations of this layer both go through it. Seeds too (override 9): `seeds/<database>/<folder>/<seed>.csv`. `incremental` and `materialized_view` keep the adapter's `config(folder=...)`.
 - Directory names with spaces are fine for dbt; select them by path: `dbt build -s "path:models/sales/30 Business Entities"`.
 - Folders dbt never writes into (datasources, base views: `/10 Connectivity`) are still created in VQL.
 

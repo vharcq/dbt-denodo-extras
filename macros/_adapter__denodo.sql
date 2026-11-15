@@ -3,7 +3,7 @@
    dbt-denodo — COMPATIBILITY LAYER
   ============================================================================
 
-  Eight overrides for the official `dbt-denodo 1.0.0` adapter, grouped in one file so
+  Nine overrides for the official `dbt-denodo 1.0.0` adapter, grouped in one file so
   they can be upstreamed. They contain NOTHING project-specific: they can move as-is
   into the adapter (`dbt/include/denodo/macros/`), after which this file is no longer
   needed.
@@ -24,6 +24,7 @@
    6. drop / rename / `table`         — database names with upper case letters
    7. `table` materialization         — cache the view in place, reload atomically
    8. `denodo__create_view_as`        — opt-in: the Denodo folder is the model's path
+   9. `seed` materialization          — a cached view in its database, no DROP CASCADE
 
   Packaging note: a materialization defined in a dbt **package** is silently ignored;
   shipped in the **adapter**, it applies correctly. On the project side it must live in
@@ -527,4 +528,66 @@
     {%- endif %}
     AS
     {{ sql }}
+{%- endmacro %}
+
+
+
+{#
+  ---------------------------------------------------------------------------
+   9. `seed` MATERIALIZATION — a cached view of literal rows, replaced in place
+  ---------------------------------------------------------------------------
+  The adapter's seed issues `DROP VIEW IF EXISTS "<x>" CASCADE`, `DROP TABLE IF EXISTS
+  "<x>" CASCADE`, then `CREATE MATERIALIZED TABLE "<x>" AS SELECT … FROM dual() UNION
+  ALL …`, all with unqualified names and no `CONNECT DATABASE`. Two problems:
+    - the table lands in the CONNECTION database of the profile, not in the seed's
+      `+database` (measured: a seed of `Finances_DEV` created in `admin`, while dbt
+      printed `OK loaded seed file Finances_DEV.<x>`);
+    - every `dbt seed` drops the views built on the seed (the CASCADE), with the tags
+      and privileges of the object (see 1.). Doing without the drop is not possible
+      on a materialized table: rows can be inserted, never deleted nor updated (VQL
+      Guide, "Materialized Tables").
+
+  Fix: the seed becomes what a mapping table hand-written in Denodo usually is, a
+  derived view `SELECT … FROM dual() UNION ALL …` with a full cache, and goes through
+  the `table` materialization of this layer (7.): `CREATE OR REPLACE VIEW` in its
+  database and its folder (8. — seeds/<database>/<folder>/<seed>.csv with
+  `folder_from_path`), full cache, atomic reload. The object keeps its identity: the
+  views built on it survive a reseed, and an existing view of the same name is taken
+  over in place. The outer SELECT lists the columns: Denodo refuses column descriptions
+  on a UNION view, and an outer `SELECT *` is not enough (measured: "The field
+  properties can only be specified for derived fields").
+
+  Types come from the CSV as dbt reads it: a column of digits is a number unless
+  `column_types` says otherwise (`column_types: {code: varchar}` keeps `00042`).
+  `cache_preload=false` and `cache_table_name` work as for `table`. Meant for small
+  reference data: the whole CSV is one VQL statement.
+#}
+{% materialization seed, adapter='denodo' -%}
+    {%- set agate_table = load_agate_table() -%}
+    {%- do store_result('agate_table', response='OK', agate_table=agate_table) -%}
+    {{ return(denodo_table_replace(this, denodo_seed_select(agate_table), pre_hooks, post_hooks)) }}
+{%- endmaterialization %}
+
+
+{% macro denodo_seed_select(agate_table) -%}
+    {%- if agate_table.rows | length == 0 -%}
+        {% do exceptions.raise_compiler_error("seed '" ~ model.name ~ "' has no row: Denodo cannot type an empty UNION") %}
+    {%- endif -%}
+    SELECT {% for name in agate_table.column_names %}"{{ name }}"{{ ", " if not loop.last }}{% endfor %} FROM (
+    {%- for row in agate_table.rows %}
+        SELECT
+        {%- for value in row %}
+            {%- set name = agate_table.column_names[loop.index0] -%}
+            {%- set kind = agate_table.columns[loop.index0].data_type | string | lower %}
+            {% if value is none -%} NULL
+            {%- elif value is sameas true or value is sameas false -%} {{ 'TRUE' if value else 'FALSE' }}
+            {%- elif 'date' in kind -%} CAST('{{ value }}' AS timestamp)
+            {%- elif value is number -%} {{ value }}
+            {%- else -%} '{{ value | string | replace("'", "''") }}'
+            {%- endif %} AS "{{ name }}"{{ "," if not loop.last }}
+        {%- endfor %}
+        FROM dual()
+        {{- "\n        UNION ALL" if not loop.last }}
+    {%- endfor %}
+    ) seed
 {%- endmacro %}
