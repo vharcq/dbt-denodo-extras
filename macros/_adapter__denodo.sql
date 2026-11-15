@@ -3,7 +3,7 @@
    dbt-denodo — COMPATIBILITY LAYER
   ============================================================================
 
-  Seven overrides for the official `dbt-denodo 1.0.0` adapter, grouped in one file so
+  Eight overrides for the official `dbt-denodo 1.0.0` adapter, grouped in one file so
   they can be upstreamed. They contain NOTHING project-specific: they can move as-is
   into the adapter (`dbt/include/denodo/macros/`), after which this file is no longer
   needed.
@@ -23,6 +23,7 @@
    5. `persist_docs`                  — YAML descriptions written into Denodo
    6. drop / rename / `table`         — database names with upper case letters
    7. `table` materialization         — cache the view in place, reload atomically
+   8. `denodo__create_view_as`        — opt-in: the Denodo folder is the model's path
 
   Packaging note: a materialization defined in a dbt **package** is silently ignored;
   shipped in the **adapter**, it applies correctly. On the project side it must live in
@@ -346,8 +347,8 @@
 
     {%- call statement('create_view') -%}
         CREATE OR REPLACE VIEW {{ relation }}
-        {% if config.get('folder') -%}
-            FOLDER = '{{ config.get('folder') }}'
+        {% if denodo_model_folder() -%}
+            FOLDER = '{{ denodo_model_folder() }}'
         {%- endif %}
         AS
         {{ sql }}
@@ -469,4 +470,61 @@
 
     {{ return({'relations': [target_relation]}) }}
 
+{%- endmacro %}
+
+
+
+{#
+  ---------------------------------------------------------------------------
+   8. `denodo__create_view_as` — the Denodo folder is the model's path (opt-in)
+  ---------------------------------------------------------------------------
+  With `folder=` in every model, the dbt tree and the Denodo tree are two truths that
+  drift apart. Opt-in (`vars: denodo: folder_from_path: true`), the project tree IS the
+  Denodo tree, VDB first:
+
+      models/<database>/<folder>/<sub-folder>/<model>.sql
+        -> view <model> in VDB <database>, folder '/<folder>/<sub-folder>'
+
+  A model directly under `models/<database>/` goes to the root of the VDB. The first
+  directory must equal the model's database (`+database` per directory in
+  dbt_project.yml): otherwise the build fails, rather than writing a view into a VDB
+  the tree does not show. An explicit `config(folder=...)` still wins.
+
+  Modified version of the adapter's macro (dbt-denodo 1.0.0, Apache License 2.0):
+  same VQL, the folder comes from `denodo_model_folder()` instead of `config.get`.
+  The `view` and `table` materializations of this file both go through it, and so does
+  `denodo__create_table_as` above.
+#}
+{% macro denodo_model_folder() -%}
+    {%- set explicit = config.get('folder') -%}
+    {%- if explicit -%}
+        {{ return(explicit) }}
+    {%- endif -%}
+    {%- if not var('denodo', {}).get('folder_from_path', false) -%}
+        {{ return(none) }}
+    {%- endif -%}
+    {#- model.path is relative to the model-paths root: '<database>/<folder>/.../<file>' -#}
+    {%- set parts = model.path.replace('\\', '/').split('/') -%}
+    {%- if parts | length < 2 or parts[0] != model.database -%}
+        {% do exceptions.raise_compiler_error(
+            "folder_from_path: model '" ~ model.name ~ "' is in models/" ~ model.path
+            ~ " but its database is '" ~ model.database ~ "'. The first directory under"
+            ~ " models/ must be the VDB: move the file, or fix +database in dbt_project.yml.") %}
+    {%- endif -%}
+    {%- if parts | length == 2 -%}
+        {{ return(none) }}
+    {%- endif -%}
+    {{ return('/' ~ (parts[1:-1] | join('/'))) }}
+{%- endmacro %}
+
+
+{% macro denodo__create_view_as(relation, sql) -%}
+    {%- set folder = denodo_model_folder() -%}
+    {% do denodo__create_folder(folder, relation.database) %}
+    CREATE OR REPLACE VIEW {{ relation }}
+    {% if folder -%}
+        FOLDER = '{{ folder }}'
+    {%- endif %}
+    AS
+    {{ sql }}
 {%- endmacro %}

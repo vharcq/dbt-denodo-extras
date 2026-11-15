@@ -30,12 +30,14 @@ A consumer never gets access to the staging database: the gold views read it thr
 
 Bronze and silver share one database here because, on a virtualization layer, the bronze is not a copy: the base views *are* the source. If you prefer three databases, nothing in the macros depends on two.
 
+The dbt folder names above are dbt's convention, mapped to a database by `+database`. If you would rather see Denodo in your project tree, name the folders after the databases and their sub-folders after the Denodo folders (`models/sales/30 Business Entities/`): override 8 then derives the folder of every view from its path, and checks that the first directory is its database. See [The folder is the path](#the-folder-is-the-path).
+
 ## What is inside
 
 | File | Content |
 |---|---|
 | `macros/denodo_custom_macros.sql` | Governance as code: roles and privileges (`denodo_apply_roles`), tags (`denodo_apply_tags`), drift audit (`denodo_audit`) |
-| `macros/_adapter__denodo.sql` | Compatibility layer for `dbt-denodo` 1.0.0: seven overrides, each documented with its diagnosis and the test that validated it |
+| `macros/_adapter__denodo.sql` | Compatibility layer for `dbt-denodo` 1.0.0: eight overrides, each documented with its diagnosis and the test that validated it |
 | `macros/_adapter__core.sql` | `generate_schema_name`: the schema follows the database (Denodo has no schemas) |
 
 ### 1. Roles and privileges: who may open which database
@@ -171,6 +173,7 @@ Why report only, and not fix: an access granted at 3 a.m. during an incident may
 | 5 | `persist_docs` | `description:` of models and columns is written into Denodo (`ALTER VIEW … DESCRIPTION`) on every build, where the Data Catalog, BI tools and the Denodo MCP Server read it. |
 | 6 | drop, rename, `create_table_as` | A database whose name has capitals (`Sales_Gold`) works. The adapter writes the name unquoted (`CONNECT DATABASE Sales_Gold`), the PostgreSQL interface folds it to lower case, and the database is not found. Overrides 4 and 5 quote it too. |
 | 7 | `table` materialization | Caches the view in place, as Design Studio and the Scheduler do, instead of a temporary view, two renames and a `DROP … CASCADE`. Views built on top of a `table` model now survive its rebuild, the reload is atomic, the cache table gets a fixed name, and `cache_preload=false` leaves the load to the Scheduler. See below. |
+| 8 | `denodo__create_view_as` | Opt-in (`vars: denodo: folder_from_path: true`): the Denodo folder of a view is its directory under `models/<database>/`, so no model needs `config(folder=...)`, and a model filed under the wrong database fails before any VQL is sent. See below. |
 
 #### The `table` materialization: a cache, reloaded in place
 
@@ -193,6 +196,29 @@ SELECT * FROM "sales"."agg_sales_by_label"
 ```
 
 Not covered: remote tables (`remote=true`), `incremental` and `materialized_view` keep the adapter's behaviour.
+
+#### The folder is the path
+
+The adapter puts a view in a Denodo folder only through `config(folder='/30 Business Entities')`, written in each model (`var()` cannot be resolved in `dbt_project.yml`). The project tree and the Denodo tree are then two truths: a model moved to another directory keeps its old folder, and nothing says which folder a file lands in without opening it.
+
+With `folder_from_path: true`, the tree under `models/` **is** the Denodo tree, database first:
+
+```
+models/
+  sales_staging/
+    _sources.yml
+    20 Integration Views/stg_customer.sql   -> sales_staging, folder /20 Integration Views
+  sales/
+    30 Business Entities/customer.sql       -> sales, folder /30 Business Entities
+    customer_kpi.sql                         -> sales, root of the database
+```
+
+- **One `+database` per top directory**, named like the database (example below). The first directory must equal the model's database: a model under `models/sales/` that writes into `sales_staging` fails at build time, before any VQL is sent, rather than creating a view in a database the tree does not show.
+- **Sub-directories nest**: `models/sales/50 Reporting/finance/x.sql` goes to `/50 Reporting/finance` (parents created by override 4).
+- **An explicit `config(folder=...)` still wins**, and without the var nothing changes: existing projects are not affected.
+- The view and `table` materializations of this layer both go through it. `incremental`, `materialized_view` and seeds keep the adapter's `config(folder=...)`.
+- Directory names with spaces are fine for dbt; select them by path: `dbt build -s "path:models/sales/30 Business Entities"`.
+- Folders dbt never writes into (datasources, base views: `/10 Connectivity`) are still created in VQL.
 
 Each override is self-contained and can move as-is into the adapter's `dbt/include/denodo/macros/`. Once the adapter ships the equivalent, delete the override.
 
@@ -253,6 +279,26 @@ models:
     staging:
       +database: sales_staging
     marts:
+      +post_hook: "{{ denodo_apply_tags() }}"
+```
+
+The same product with the project tree mirroring Denodo (override 8): the top directories are named after the databases, and no model sets `folder=`.
+
+```yaml
+vars:
+  denodo:
+    folder_from_path: true
+
+models:
+  sales:
+    +materialized: view
+    +persist_docs:
+      relation: true
+      columns: true
+    sales_staging:            # models/sales_staging/<folder>/*.sql
+      +database: sales_staging
+    sales:                    # models/sales/<folder>/*.sql
+      +database: sales
       +post_hook: "{{ denodo_apply_tags() }}"
 ```
 
