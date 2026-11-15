@@ -3,12 +3,14 @@
    dbt-denodo — COMPATIBILITY LAYER
   ============================================================================
 
-  Nine overrides for the official `dbt-denodo 1.0.0` adapter, grouped in one file so
+  Nine overrides for the official `dbt-denodo` adapter (1.1.0, also 1.0.0), grouped in one file so
   they can be upstreamed. They contain NOTHING project-specific: they can move as-is
   into the adapter (`dbt/include/denodo/macros/`), after which this file is no longer
   needed.
 
-  Tested on: Denodo Virtual DataPort 9.4.7, dbt-core 1.12.6, dbt-denodo 1.0.0.
+  Tested on: Denodo Virtual DataPort 9.4.7, dbt-core 1.12.6, dbt-denodo 1.0.0 (live)
+  and 1.1.0 (`dbt parse`). Of the macros overridden here, 1.1.0 only changes
+  `create_table_as` (`cache_return_query_results`), and the override follows it.
 
   Origin: overrides 2 (`denodo__get_catalog`), 4 (`denodo__create_folder`) and 6
   (drop, rename, create_table_as) are modified versions of the macros of the same
@@ -298,6 +300,12 @@
   (create, cache, rename, drop). A root-project macro takes precedence over the
   adapter's one even where the adapter calls it by its bare name. Not covered: remote
   tables (`remote=true`), `incremental`, `materialized_view`.
+
+  `create_table_as` also loads the cache with `'cache_return_query_results' = 'false'`,
+  as dbt-denodo 1.1.0 does: Denodo fills the cache without sending the rows back to
+  dbt, so a large load neither swaps on the server nor fills the client's memory.
+  Without this line, this override would hide that fix of 1.1.0 from the models that
+  still call `create_table_as` (first build of an `incremental` model, snapshots).
 #}
 {% macro denodo__drop_view(relation) -%}
     {% call statement('drop_view', auto_begin=False) -%}
@@ -370,7 +378,8 @@
         CONTEXT (
         'i18n'='us_pst',
         'cache_preload'='true',
-        'cache_wait_for_load'='true'
+        'cache_wait_for_load'='true',
+        'cache_return_query_results' = 'false'
         )
     {%- endcall -%}
 

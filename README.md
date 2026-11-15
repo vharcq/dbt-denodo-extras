@@ -1,6 +1,6 @@
 # dbt-denodo-extras
 
-Governance as code for [Denodo](https://www.denodo.com) with [dbt](https://www.getdbt.com): a set of macros that sits on top of Denodo's **official** dbt adapter, [`dbt-denodo`](https://pypi.org/project/dbt-denodo/) 1.0.0, published by Denodo Research Labs.
+Governance as code for [Denodo](https://www.denodo.com) with [dbt](https://www.getdbt.com): a set of macros that sits on top of Denodo's **official** dbt adapter, [`dbt-denodo`](https://pypi.org/project/dbt-denodo/) 1.1.0 (1.0.0 works too), published by Denodo Research Labs.
 
 This is not an adapter and not a fork. You install the official adapter as usual; this repository adds two things next to it:
 
@@ -37,7 +37,7 @@ The dbt folder names above are dbt's convention, mapped to a database by `+datab
 | File | Content |
 |---|---|
 | `macros/denodo_custom_macros.sql` | Governance as code: roles and privileges (`denodo_apply_roles`), tags (`denodo_apply_tags`), drift audit (`denodo_audit`) |
-| `macros/_adapter__denodo.sql` | Compatibility layer for `dbt-denodo` 1.0.0: nine overrides, each documented with its diagnosis and the test that validated it |
+| `macros/_adapter__denodo.sql` | Compatibility layer for `dbt-denodo` 1.1.0 and 1.0.0: nine overrides, each documented with its diagnosis and the test that validated it |
 | `macros/_adapter__core.sql` | `generate_schema_name`: the schema follows the database (Denodo has no schemas) |
 
 ### 1. Roles and privileges: who may open which database
@@ -227,7 +227,18 @@ Each override is self-contained and can move as-is into the adapter's `dbt/inclu
 
 ## Installation
 
-There is nothing to install. You need a working dbt project on Denodo's official adapter; then clone this repository next to it:
+There is nothing to install for this repository itself. It needs dbt-core and Denodo's official adapter, installed in two steps:
+
+```bash
+pip install dbt-core psycopg2-binary
+pip install dbt-denodo --no-deps              # 1.0.0, from PyPI
+# or, with the 1.1.0 wheel distributed by Denodo:
+pip install dbt_denodo-1.1.0-py3-none-any.whl --no-deps
+```
+
+Why `--no-deps`: the adapter (1.0.0 and 1.1.0) pins `dbt-core~=1.11.11`. A plain `pip install` would downgrade dbt-core from 1.12 to 1.11. With `--no-deps`, pip leaves dbt-core alone; `pip check` then reports the pin (`dbt-denodo 1.1.0 has requirement dbt-core~=1.11.11, but you have dbt-core 1.12.6`), which can be ignored: the adapter only depends on `dbt-adapters` (`<2.0`), and everything in this repository runs on dbt-core 1.12.6. `dbt --version` must list the `denodo` plugin. If you would rather respect the pin, use `pip install "dbt-core~=1.11.11"` in a dedicated virtual environment.
+
+Then clone this repository next to your dbt project:
 
 ```bash
 git clone https://github.com/vharcq/dbt-denodo-extras.git
@@ -321,8 +332,10 @@ Deployment order matters once roles come from dbt: anything that names a role (a
 |---|---|
 | Denodo Virtual DataPort | 9.4.7 |
 | dbt-core | 1.12.6 |
-| dbt-denodo (official adapter) | 1.0.0 |
+| dbt-denodo (official adapter) | 1.1.0, and 1.0.0 |
 | Connection | PostgreSQL-compatible interface, port 9996 |
+
+The full live run was done on dbt-denodo 1.0.0; on 1.1.0, `dbt parse` passes. Of the macros overridden here, 1.1.0 changes only `create_table_as`, which now loads the cache with `'cache_return_query_results' = 'false'`; the override does the same. At the time of writing, PyPI has 1.0.0 and 1.1.0 is distributed by Denodo. Both pin `dbt-core~=1.11.11`: see Installation for `--no-deps`.
 
 ## License
 
