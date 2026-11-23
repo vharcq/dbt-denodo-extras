@@ -223,7 +223,7 @@
   ---------------------------------------------------------------------------
    denodo_audit — what drifted in the VDBs this project governs
   ---------------------------------------------------------------------------
-      dbt run-operation denodo_audit --profiles-dir ..
+      dbt run-operation denodo_audit --profiles-dir .. --target <dbt target>
 
   Deliberately NOT a hook. It reads the server state role by role (`LIST ROLES` + one
   `DESC VQL ROLE` each — there is no catalog view for privileges), which is far too
